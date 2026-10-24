@@ -1,0 +1,39 @@
+:root {
+  --bg: #0e1014;
+  --panel: #171a21;
+  --text: #e6e8ee;
+  --muted: #8b93a7;
+  --border: #2a2f3a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, sans-serif;
+  overflow: hidden;
+}
+#viewport { position: relative; min-width: 0; min-height: 0; }
+#viewport canvas { display: block; }
+#sidebar {
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 12px;
+  overflow-y: auto;
+}
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 8px 0; }
+#metrics { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+#metrics dt { color: var(--muted); }
+#metrics dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+#status { color: var(--muted); min-height: 2.8em; }
+#thumbs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+#thumbs figure { margin: 0; }
+#thumbs canvas { width: 100%; display: block; border-radius: 3px; }
+#thumbs figcaption { color: var(--muted); font-size: 11px; }
+#viewport > .lil-gui.lil-root { position: absolute; top: 8px; right: 8px; max-height: calc(100% - 16px); overflow-y: auto; }
+@media (max-width: 800px) {
+  body { grid-template-columns: 1fr; grid-template-rows: 60vh auto; overflow: auto; }
+  #sidebar { border-left: none; border-top: 1px solid var(--border); }
+}
