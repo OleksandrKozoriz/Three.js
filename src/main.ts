@@ -1,15 +1,30 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import type GUI from 'lil-gui';
 import './style.css';
-import { createRoom, mulberry32 } from './scene/room';
+import { createRoom } from './scene/room';
 import { CameraRig, HELPER_LAYER } from './rig/CameraRig';
 import { Capturer, type CaptureFrame } from './capture/capture';
 import { reconstruct, type PointCloud } from './recon/depthFusion';
+import { estimateStereo } from './recon/stereo';
 import { PointCloudView } from './recon/PointCloudView';
 import { evaluate, sampleSurface, type Metrics } from './eval/metrics';
-import type GUI from 'lil-gui';
 import { createGui, type Settings } from './ui/gui';
 import { downloadDataset, downloadPly } from './export/export';
+import { LENS_PRESETS } from './camera/models';
+import { IDEAL_SENSOR } from './camera/sensor';
+import { PERFECT_CALIBRATION } from './camera/calibration';
+import { mulberry32 } from './util/random';
+
+/** How well stereo ranges match the ideal sensor's, per pixel (diagnostic). */
+interface StereoStats {
+  /** Fraction of lens pixels that got a range estimate. */
+  density: number;
+  /** Median |stereo − true| / true over estimated pixels. */
+  medianRelError: number;
+  /** Fraction of estimated pixels within 5% of the true range. */
+  within5pct: number;
+}
 
 class App {
   readonly settings: Settings = {
@@ -22,14 +37,36 @@ class App {
       centerX: 0,
       centerY: 1.4,
       centerZ: 0,
-      fovDeg: 70,
+      lens: { ...LENS_PRESETS[0].lens },
       width: 320,
       height: 240,
       near: 0.05,
       far: 20,
     },
-    fusion: { stride: 1, noiseSigma: 0, noiseQuadratic: 0, voxelSize: 0, maxDepth: 20 },
-    view: { showRoom: true, roomOpacity: 1, showCloud: true, showFrustums: true, pointSize: 0.015, colorMode: 'rgb' },
+    sensor: { ...IDEAL_SENSOR },
+    calibration: { ...PERFECT_CALIBRATION },
+    seed: 1,
+    fusion: { source: 'sensor', stride: 1, noiseSigma: 0, noiseQuadratic: 0, voxelSize: 0, maxDepth: 20 },
+    stereo: {
+      neighbors: 2,
+      planes: 0,
+      minRange: 0.3,
+      maxRange: 12,
+      windowRadius: 3,
+      minScore: 0.6,
+      minTexture: 0.01,
+      consistencyViews: 1,
+      consistencyTol: 0.05,
+    },
+    view: {
+      showRoom: true,
+      roomOpacity: 1,
+      showCloud: true,
+      showFrustums: true,
+      pointSize: 0.015,
+      colorMode: 'rgb',
+      thumbnails: 'image',
+    },
     evaluation: { threshold: 0.05, gtSamples: 300000 },
   };
 
@@ -46,6 +83,9 @@ class App {
   frames: CaptureFrame[] = [];
   cloud?: PointCloud;
   metrics?: Metrics;
+  stereoStats?: StereoStats;
+  private stereoKey = '';
+  private busy = false;
   private gt?: { samples: number; points: Float32Array };
 
   private readonly viewport = document.getElementById('viewport')!;
@@ -76,13 +116,13 @@ class App {
 
     this.gui = createGui(this.settings, {
       onRigChange: () => this.rebuildRig(),
-      onFusionChange: () => this.frames.length && this.reconstruct(),
+      onFusionChange: () => this.frames.length && this.guarded(() => this.reconstruct()),
       onViewChange: () => this.applyView(),
-      runAll: () => this.runAll(),
-      capture: () => this.capture(),
-      reconstruct: () => this.reconstruct(),
-      evaluate: () => this.evaluate(),
-      exportDataset: () => this.exportDataset(),
+      runAll: () => this.guarded(() => this.runAll()),
+      capture: () => this.guarded(async () => this.capture()),
+      reconstruct: () => this.guarded(() => this.reconstruct()),
+      evaluate: () => this.guarded(async () => this.evaluate()),
+      exportDataset: () => this.guarded(() => this.exportDataset()),
       exportPly: () => (this.cloud ? downloadPly(this.cloud) : this.status('Nothing to export: reconstruct first.')),
     });
 
@@ -111,19 +151,46 @@ class App {
     const roomVisible = this.room.group.visible;
     this.room.group.visible = true;
     this.room.setOpacity(1);
-    this.frames = this.capturer.capture(this.scene, this.rig.cameras, this.rig.intrinsics);
+    const { rig, sensor, calibration, seed } = this.settings;
+    this.frames = this.capturer.capture(this.scene, this.rig.cameras, {
+      lens: rig.lens,
+      width: rig.width,
+      height: rig.height,
+      near: rig.near,
+      far: rig.far,
+      sensor,
+      calibration,
+      seed,
+    });
     this.room.group.visible = roomVisible;
     this.room.setOpacity(this.settings.view.roomOpacity);
+    this.stereoKey = '';
+    this.stereoStats = undefined;
     this.renderThumbnails();
     this.status(`Captured ${this.frames.length} views in ${(performance.now() - t0).toFixed(0)} ms.`);
     return this.frames;
   }
 
-  reconstruct(): PointCloud | undefined {
+  /** Runs stereo matching if the depth source needs it and it is not up to date. */
+  async ensureStereo(): Promise<void> {
+    const key = JSON.stringify(this.settings.stereo);
+    if (this.stereoKey === key) return;
+    const t0 = performance.now();
+    await estimateStereo(this.frames, this.settings.stereo, (done, total) =>
+      this.status(`Stereo matching… ${Math.round((100 * done) / total)}%`),
+    );
+    this.stereoKey = key;
+    this.stereoStats = this.computeStereoStats();
+    this.renderThumbnails();
+    this.status(`Stereo matching took ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+  }
+
+  async reconstruct(): Promise<PointCloud | undefined> {
     if (!this.frames.length) {
       this.status('Capture first.');
       return undefined;
     }
+    if (this.settings.fusion.source === 'stereo') await this.ensureStereo();
     const t0 = performance.now();
     this.cloud = reconstruct(this.frames, this.settings.fusion);
     this.cloudView.setCloud(this.cloud, this.frames.length, this.settings.view.colorMode);
@@ -149,9 +216,9 @@ class App {
     return this.metrics;
   }
 
-  runAll(): Metrics | undefined {
+  async runAll(): Promise<Metrics | undefined> {
     this.capture();
-    this.reconstruct();
+    await this.reconstruct();
     return this.evaluate();
   }
 
@@ -161,7 +228,7 @@ class App {
       return;
     }
     this.status('Building zip…');
-    await downloadDataset(this.frames, this.rig.config, this.cloud);
+    await downloadDataset(this.frames, this.rig.config, this.settings, this.cloud);
     this.status('Dataset downloaded.');
   }
 
@@ -173,6 +240,50 @@ class App {
     this.cloudView.size = v.pointSize;
     this.cloudView.setColorMode(v.colorMode);
     this.rig.setHelpersVisible(v.showFrustums);
+    this.renderThumbnails();
+  }
+
+  /** Runs one action at a time; long ones (stereo) are async. */
+  private async guarded(action: () => Promise<unknown>): Promise<void> {
+    if (this.busy) {
+      this.status('Busy — wait for the current step to finish.');
+      return;
+    }
+    this.busy = true;
+    try {
+      await action();
+    } catch (err) {
+      console.error(err);
+      this.status(`Error: ${(err as Error).message}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private computeStereoStats(): StereoStats {
+    let lens = 0;
+    let estimated = 0;
+    let within = 0;
+    const errors: number[] = [];
+    for (const f of this.frames) {
+      const s = f.stereoRange;
+      if (!s) continue;
+      for (let i = 0; i < f.range.length; i++) {
+        if (!(f.range[i] > 0)) continue;
+        lens++;
+        if (!(s[i] > 0)) continue;
+        estimated++;
+        const e = Math.abs(s[i] - f.range[i]) / f.range[i];
+        if (e <= 0.05) within++;
+        if (i % 7 === 0) errors.push(e); // subsample for the median
+      }
+    }
+    errors.sort((a, b) => a - b);
+    return {
+      density: lens ? estimated / lens : 0,
+      medianRelError: errors.length ? errors[errors.length >> 1] : NaN,
+      within5pct: estimated ? within / estimated : 0,
+    };
   }
 
   private resize(): void {
@@ -182,14 +293,36 @@ class App {
     this.viewCamera.updateProjectionMatrix();
   }
 
+  /** Color-mapped range image: near = warm, far = cool, no value = black. */
+  private rangeImage(range: Float32Array, w: number, h: number): ImageData {
+    const img = new ImageData(w, h);
+    const c = new THREE.Color();
+    const maxR = 8;
+    for (let i = 0; i < w * h; i++) {
+      img.data[i * 4 + 3] = 255;
+      const r = range[i];
+      if (!(r > 0)) continue;
+      c.setHSL(Math.min(1, r / maxR) * 0.7, 0.9, 0.5);
+      img.data[i * 4] = c.r * 255;
+      img.data[i * 4 + 1] = c.g * 255;
+      img.data[i * 4 + 2] = c.b * 255;
+    }
+    return img;
+  }
+
   private renderThumbnails(): void {
+    const mode = this.settings.view.thumbnails;
     this.thumbs.replaceChildren(
       ...this.frames.map((f) => {
+        const { width: w, height: h } = f.model;
+        let img = f.image;
+        if (mode === 'sensor depth') img = this.rangeImage(f.range, w, h);
+        if (mode === 'stereo depth') img = this.rangeImage(f.stereoRange ?? new Float32Array(w * h), w, h);
         const fig = document.createElement('figure');
         const canvas = document.createElement('canvas');
-        canvas.width = f.image.width;
-        canvas.height = f.image.height;
-        canvas.getContext('2d')!.putImageData(f.image, 0, 0);
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d')!.putImageData(img, 0, 0);
         const cap = document.createElement('figcaption');
         cap.textContent = f.name;
         fig.append(canvas, cap);
@@ -200,9 +333,11 @@ class App {
 
   private renderMetrics(): void {
     const m = this.metrics;
+    const s = this.stereoStats;
     const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
     const rows: [string, string][] = [
       ['Cameras', String(this.rig.cameras.length)],
+      ['Depth from', this.settings.fusion.source === 'stereo' ? 'stereo' : 'ideal sensor'],
       ['Points', this.cloud ? this.cloud.count.toLocaleString() : '—'],
       ['Threshold τ', m ? `${(m.threshold * 100).toFixed(1)} cm` : '—'],
       ['Precision', m ? pct(m.precision) : '—'],
@@ -210,6 +345,13 @@ class App {
       ['F-score', m ? pct(m.fscore) : '—'],
       ['Mean error', m ? `${(m.meanError * 1000).toFixed(1)} mm` : '—'],
     ];
+    if (s && this.settings.fusion.source === 'stereo') {
+      rows.push(
+        ['Stereo density', pct(s.density)],
+        ['Stereo median error', pct(s.medianRelError)],
+        ['Stereo within 5%', pct(s.within5pct)],
+      );
+    }
     this.metricsEl.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   }
 

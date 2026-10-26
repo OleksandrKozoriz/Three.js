@@ -1,7 +1,11 @@
+import type * as THREE from 'three';
 import { zipSync, strToU8 } from 'fflate';
 import type { CaptureFrame } from '../capture/capture';
 import type { PointCloud } from '../recon/depthFusion';
 import type { RigConfig } from '../rig/CameraRig';
+import type { CameraModel } from '../camera/models';
+import { linearToSrgbByte } from '../camera/sensor';
+import type { Settings } from '../ui/gui';
 
 function download(data: BlobPart, filename: string, type: string): void {
   const url = URL.createObjectURL(new Blob([data], { type }));
@@ -10,11 +14,6 @@ function download(data: BlobPart, filename: string, type: string): void {
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function srgbByte(c: number): number {
-  const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
-  return Math.round(Math.min(1, Math.max(0, v)) * 255);
 }
 
 /** Binary little-endian PLY with float xyz and uchar sRGB colors. */
@@ -34,9 +33,9 @@ export function pointCloudToPly(cloud: PointCloud): Uint8Array {
     view.setFloat32(o, cloud.positions[i * 3], true);
     view.setFloat32(o + 4, cloud.positions[i * 3 + 1], true);
     view.setFloat32(o + 8, cloud.positions[i * 3 + 2], true);
-    view.setUint8(o + 12, srgbByte(cloud.colors[i * 3]));
-    view.setUint8(o + 13, srgbByte(cloud.colors[i * 3 + 1]));
-    view.setUint8(o + 14, srgbByte(cloud.colors[i * 3 + 2]));
+    view.setUint8(o + 12, linearToSrgbByte(cloud.colors[i * 3]));
+    view.setUint8(o + 13, linearToSrgbByte(cloud.colors[i * 3 + 1]));
+    view.setUint8(o + 14, linearToSrgbByte(cloud.colors[i * 3 + 2]));
   }
   return out;
 }
@@ -53,50 +52,71 @@ async function imageToPng(image: ImageData): Promise<Uint8Array> {
 }
 
 /** Row-major 4x4 (as used by NeRF / nerfstudio transforms.json). */
-function rowMajor(frame: CaptureFrame): number[][] {
-  const e = frame.cameraToWorld.elements;
+function rowMajor(m: THREE.Matrix4): number[][] {
+  const e = m.elements;
   return [0, 1, 2, 3].map((r) => [e[r], e[r + 4], e[r + 8], e[r + 12]]);
 }
 
+/** Intrinsics in nerfstudio / COLMAP naming. */
+function intrinsicsJson(m: CameraModel) {
+  const [a, b, c, d] = m.dist;
+  return {
+    camera_model: m.type === 'pinhole' ? 'OPENCV' : 'OPENCV_FISHEYE',
+    fl_x: m.fx,
+    fl_y: m.fy,
+    cx: m.cx,
+    cy: m.cy,
+    w: m.width,
+    h: m.height,
+    ...(m.type === 'pinhole' ? { k1: a, k2: b, p1: c, p2: d } : { k1: a, k2: b, k3: c, k4: d }),
+  };
+}
+
 /**
- * NeRF/nerfstudio-compatible `transforms.json` (OpenGL camera convention).
- * Depth maps are raw little-endian float32, row-major, top row first, meters along the optical axis.
+ * nerfstudio-compatible `transforms.json` with the calibration a real rig would have
+ * (including the simulated calibration error). Poses use the OpenGL camera convention.
+ * Range maps are raw little-endian float32, row-major, top row first: distance in meters
+ * from the optical center along each pixel's ray (not z-depth), 0 = no value.
  */
 export function buildTransforms(frames: CaptureFrame[], rig: RigConfig) {
-  const k = frames[0].intrinsics;
   return {
-    camera_model: 'OPENCV',
-    fl_x: k.fx,
-    fl_y: k.fy,
-    cx: k.cx,
-    cy: k.cy,
-    w: k.width,
-    h: k.height,
-    k1: 0,
-    k2: 0,
-    p1: 0,
-    p2: 0,
-    camera_angle_x: 2 * Math.atan(k.width / 2 / k.fx),
-    camera_angle_y: 2 * Math.atan(k.height / 2 / k.fy),
+    ...intrinsicsJson(frames[0].model),
     units: 'meters',
-    depth_format: 'float32 little-endian, row-major, top row first, view-space z in meters, 0 = no hit',
+    depth_format: 'float32 little-endian, row-major, top row first, range along the pixel ray in meters, 0 = no value',
     rig,
     frames: frames.map((f) => ({
       file_path: `images/${f.name}.png`,
       depth_file_path: `depth/${f.name}.f32`,
+      ...(f.stereoRange ? { stereo_depth_file_path: `depth_stereo/${f.name}.f32` } : {}),
       camera_index: f.index,
-      transform_matrix: rowMajor(f),
+      ...intrinsicsJson(f.model),
+      transform_matrix: rowMajor(f.cameraToWorld),
     })),
   };
 }
 
-export async function downloadDataset(frames: CaptureFrame[], rig: RigConfig, cloud?: PointCloud): Promise<void> {
+/** The true calibration the images were rendered with, plus all simulation settings. */
+export function buildGroundTruth(frames: CaptureFrame[], settings: Settings) {
+  return {
+    note: 'True camera parameters used to render the images. A real rig would not know these.',
+    settings,
+    frames: frames.map((f) => ({
+      name: f.name,
+      ...intrinsicsJson(f.trueModel),
+      transform_matrix: rowMajor(f.trueCameraToWorld),
+    })),
+  };
+}
+
+export async function downloadDataset(frames: CaptureFrame[], rig: RigConfig, settings: Settings, cloud?: PointCloud): Promise<void> {
   const files: Record<string, Uint8Array> = {};
   for (const f of frames) {
     files[`images/${f.name}.png`] = await imageToPng(f.image);
-    files[`depth/${f.name}.f32`] = new Uint8Array(f.depth.buffer.slice(0));
+    files[`depth/${f.name}.f32`] = new Uint8Array(f.range.buffer.slice(0));
+    if (f.stereoRange) files[`depth_stereo/${f.name}.f32`] = new Uint8Array(f.stereoRange.buffer.slice(0));
   }
   files['transforms.json'] = strToU8(JSON.stringify(buildTransforms(frames, rig), null, 2));
+  files['ground_truth.json'] = strToU8(JSON.stringify(buildGroundTruth(frames, settings), null, 2));
   if (cloud) files['pointcloud.ply'] = pointCloudToPly(cloud);
   download(zipSync(files, { level: 6 }) as BlobPart, 'inside-out-capture.zip', 'application/zip');
 }
