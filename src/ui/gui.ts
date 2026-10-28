@@ -50,7 +50,13 @@ export interface GuiActions {
 /** "Realistic" calibration: what a careful checkerboard + rig calibration typically leaves. */
 const TYPICAL_CALIBRATION: CalibrationError = { positionMm: 1, rotationDeg: 0.1, focalPct: 0.3, principalPx: 0.5 };
 
-export function createGui(settings: Settings, actions: GuiActions): GUI {
+export interface GuiHandle {
+  gui: GUI;
+  /** Re-reads all settings into the panel (values, labels, visibility) after changes made from code. */
+  refresh(): void;
+}
+
+export function createGui(settings: Settings, actions: GuiActions): GuiHandle {
   const gui = new GUI({ title: 'Inside-out reconstruction', container: document.getElementById('viewport')! });
   const { rig, sensor, calibration, fusion, stereo, view, evaluation } = settings;
   const refresh = () => gui.controllersRecursive().forEach((c) => c.updateDisplay());
@@ -64,9 +70,13 @@ export function createGui(settings: Settings, actions: GuiActions): GUI {
   // --- Rig -------------------------------------------------------------------
   const r = gui.addFolder('Camera rig');
   const countCtrl = r.add(rig, 'count', 1, 64, 1).name('cameras');
-  r.add(rig, 'preset', ['ring', 'sphere', 'cube']).name('layout').onChange(() => syncVisibility());
+  r.add(rig, 'preset', ['ring', 'sphere', 'cube', 'eyes']).name('layout').onChange(() => syncVisibility());
   r.add(rig, 'radius', 0, 1, 0.01).name('radius (m)');
-  r.add(rig, 'pitchDeg', -60, 60, 1).name('ring pitch (°)');
+  const pitchCtrl = r.add(rig, 'pitchDeg', -60, 60, 1);
+  const eyesOnly: Controller[] = [
+    r.add(rig, 'eyeSeparation', 0.01, 0.5, 0.005).name('eye separation (m)'),
+    r.add(rig, 'vergenceDeg', 0, 15, 0.5).name('eye toe-in (°)'),
+  ];
   r.add(rig, 'yawDeg', -180, 180, 1).name('rig yaw (°)');
   r.add(rig, 'centerX', -3.8, 3.8, 0.05).name('center x');
   r.add(rig, 'centerY', 0.1, 2.9, 0.05).name('center y');
@@ -166,6 +176,10 @@ export function createGui(settings: Settings, actions: GuiActions): GUI {
 
   function syncVisibility() {
     countCtrl.enable(rig.preset !== 'cube');
+    countCtrl.name(rig.preset === 'eyes' ? 'eye pairs' : 'cameras');
+    pitchCtrl.name(rig.preset === 'eyes' ? 'pitch (°)' : 'ring pitch (°)');
+    pitchCtrl.show(rig.preset === 'ring' || rig.preset === 'eyes');
+    eyesOnly.forEach((ctrl) => ctrl.show(rig.preset === 'eyes'));
     const fisheye = rig.lens.type === 'fisheye';
     fovCtrl.name(fisheye ? 'image circle FOV (°)' : 'vertical FOV (°)');
     pinholeOnly.forEach((ctrl) => ctrl.show(!fisheye));
@@ -175,5 +189,11 @@ export function createGui(settings: Settings, actions: GuiActions): GUI {
   }
   syncVisibility();
   for (const folder of [l, s, c, f, st, e, x]) folder.close();
-  return gui;
+  return {
+    gui,
+    refresh: () => {
+      refresh();
+      syncVisibility();
+    },
+  };
 }

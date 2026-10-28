@@ -4,7 +4,7 @@ A virtual environment for testing **inside-out 3D scene reconstruction**: a rig 
 
 Before building real hardware, this app lets you:
 
-1. Put a configurable camera rig (ring, sphere, or cube layout; any number of cameras) inside a procedural room.
+1. Put a configurable camera rig (ring, sphere, cube, or "eyes" — side-by-side stereo pairs) inside a procedural room.
 2. **Capture** images the way real cameras would: pinhole or fisheye lenses with distortion, a sensor model (blur, vignetting, exposure and white-balance mismatch, noise, 8-bit output), and an imperfect calibration.
 3. **Reconstruct** a colored point cloud, with depth either from an ideal depth sensor (upper bound) or estimated from the **images only** with multi-view stereo.
 4. **Evaluate** the result against the ground-truth room geometry (precision, completeness, F-score), plus per-pixel stereo accuracy.
@@ -24,7 +24,8 @@ Requires a browser with WebGL2 and `EXT_color_buffer_float` (all current desktop
 ## Using it
 
 - **▶ Capture + reconstruct + evaluate** runs the whole pipeline. **depth from** picks the ideal depth sensor or stereo (images only).
-- **Camera rig**: layout, number of cameras, rig radius (distance of each lens from the rig center), ring pitch, rig yaw, rig position, image resolution, near/far.
+- **Camera rig**: layout, number of cameras, rig radius (distance of each lens from the rig center), pitch, rig yaw, rig position, image resolution, near/far.
+  - **eyes** layout: *N* pairs of cameras placed side by side like a pair of eyes, the pairs spread evenly around the rig (1 pair = a head looking one way, 4 pairs = 360° where every direction is seen in stereo). Set the **eye separation** (baseline; human ≈ 6.5 cm) and **eye toe-in** (vergence; 0 = parallel).
 - **Lens**: presets (ideal pinhole, webcam, wide module with strong barrel distortion, 160° action-cam fisheye, 200° 360-cam fisheye) or manual model, FOV and OpenCV distortion coefficients.
 - **Sensor**: `ideal` or `realistic` preset, or tune blur, vignetting, exposure, per-camera exposure / white-balance mismatch, full-well capacity (shot noise) and read noise.
 - **Calibration error**: `perfect` or `typical` preset, or set the σ of position, rotation, focal length and principal-point errors. Images are formed with the true calibration; reconstruction only gets the perturbed one, as with a real rig.
@@ -65,6 +66,8 @@ Ideal depth sensor — validates the lens and rig geometry:
 | ring, 8 cams | pinhole 70° | 100.0% | 64.2% | 78.2% |
 | ring, 8 cams | wide, strong barrel | 100.0% | 70.6% | 82.7% |
 | ring, 2 cams | fisheye 200° | 100.0% | 71.1% | 83.1% |
+| eyes, 4 pairs | pinhole 70° | 100.0% | 58.1% | 73.5% |
+| eyes, 2 pairs, 5° toe-in | fisheye 200° | 100.0% | 75.1% | 85.8% |
 | cube, 6 cams | fisheye 200° | 100.0% | 76.9% | 86.9% |
 
 Stereo from images only (ideal sensor, perfect calibration unless noted):
@@ -73,13 +76,17 @@ Stereo from images only (ideal sensor, perfect calibration unless noted):
 | --- | --- | --- | --- | --- |
 | ring, 8 cams, r = 0.1 m, pinhole 70° | 52.4% | 24.9% | 39.7% | 1.8% |
 | ring, 12 cams, r = 0.3 m, pinhole 70° | 79.4% | 40.8% | 50.5% | 0.8% |
+| eyes, 4 pairs, 6.5 cm apart, pinhole 70° | 58.8% | 30.2% | 46.1% | 1.7% |
+| eyes, 4 pairs, 20 cm apart, pinhole 70° | 82.1% | 32.6% | 40.5% | 0.7% |
 | cube, 6 cams, r = 0.3 m, fisheye 200° | 73.4% | 21.7% | 25.0% | 1.6% |
 | ring, 12 cams, r = 0.3 m, realistic sensor + typical calibration | 8.2% | 6.2% | 24.7% | 39.4% |
+| eyes, 4 pairs, 20 cm apart, realistic sensor + typical calibration | 8.1% | 4.5% | 26.8% | 15.6% |
 
 What this shows:
 
 - **Baseline is everything.** Stereo depth comes from disparity `d = f · B / r`. With the lenses only `B` = 8–15 cm apart, a wall 3 m away shifts just 4–9 px between neighbouring cameras, so every pixel of matching error is several percent of range error. A larger rig radius helps directly.
 - **Image quality barely matters, calibration does.** Blur, vignetting, exposure/white-balance mismatch and noise each change the median error by < 1 percentage point (NCC is insensitive to gain and offset). A principal-point error of σ = 0.5 px alone raises the median error to 5–9%; all "typical" calibration errors together give 9–46% depending on the random draw. A real inside-out rig therefore needs very accurate calibration, ideally refined from the captured images themselves (bundle adjustment).
+- **Eyes trade coverage for overlap.** A pair's two images overlap almost completely, so stereo works across the whole image rather than only at the edges where ring neighbours overlap, and pairs are more robust to calibration error (15.6% vs 39.4% median error with the same errors). But only *N* directions are covered, so total completeness is lower than a ring with the same number of cameras. Eye separation sets accuracy the same way the ring radius does: 6.5 cm ≈ the 8-camera ring, 20 cm ≈ the 12-camera ring.
 - **Overlap limits density.** Stereo only works where neighbouring views overlap; the cube rig with 200° fisheyes has the widest coverage per camera but less overlap at the image edges, where fisheye resolution is lowest.
 
 ## How it works
@@ -88,7 +95,7 @@ What this shows:
 src/
   main.ts                 App: renderer, viewer, wiring between steps, sidebar
   scene/room.ts           Procedural textured room (walls, furniture, lights) = ground truth
-  rig/layouts.ts          Camera poses for ring / Fibonacci sphere / cube layouts
+  rig/layouts.ts          Camera poses for ring / Fibonacci sphere / cube / eyes layouts
   rig/CameraRig.ts        Camera poses + lens-aware frustum helpers
   camera/models.ts        Pinhole (OpenCV) and fisheye (Kannala–Brandt) project / unproject, presets
   camera/sensor.ts        Blur, vignetting, exposure, white balance, shot + read noise, 8-bit sRGB

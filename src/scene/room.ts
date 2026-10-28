@@ -340,7 +340,10 @@ export function createRoom(options: RoomOptions = {}): Room {
   const setOpacity = (opacity: number) => {
     for (const m of materials) {
       m.opacity = opacity;
-      m.transparent = opacity < 1 || originalTransparent.get(m)!;
+      const transparent = opacity < 1 || originalTransparent.get(m)!;
+      // Toggling transparency changes the shader variant, so the program must be rebuilt.
+      if (m.transparent !== transparent) m.needsUpdate = true;
+      m.transparent = transparent;
       m.depthWrite = opacity >= 1;
     }
   };

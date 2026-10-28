@@ -31,9 +31,14 @@ const configs = [
   { name: 'ring-2 fisheye 200°', rig: { count: 2, lens: fisheye }, minPrecision: 0.99 },
   { name: 'cube-6 fisheye 200°', rig: { preset: 'cube', lens: fisheye }, minPrecision: 0.99 },
   { name: 'ring-8 real sensor+calib', rig: { count: 8, lens: pinhole }, sensor: realistic, calibration: typicalCalib },
+  { name: 'eyes-4 pinhole', rig: { preset: 'eyes', count: 4, lens: pinhole }, minPrecision: 0.99 },
+  { name: 'eyes-2 fisheye 200° toe-in', rig: { preset: 'eyes', count: 2, vergenceDeg: 5, lens: fisheye }, minPrecision: 0.99 },
   { name: 'STEREO ring-8 r=0.1', rig: { count: 8, lens: pinhole }, source: 'stereo' },
   { name: 'STEREO ring-12 r=0.3', rig: { count: 12, radius: 0.3, lens: pinhole }, source: 'stereo' },
   { name: 'STEREO ring-12 r=0.3 real', rig: { count: 12, radius: 0.3, lens: pinhole }, sensor: realistic, calibration: typicalCalib, source: 'stereo' },
+  { name: 'STEREO eyes-4 sep=6.5cm', rig: { preset: 'eyes', count: 4, lens: pinhole }, source: 'stereo' },
+  { name: 'STEREO eyes-4 sep=20cm', rig: { preset: 'eyes', count: 4, eyeSeparation: 0.2, lens: pinhole }, source: 'stereo' },
+  { name: 'STEREO eyes-4 sep=20cm real', rig: { preset: 'eyes', count: 4, eyeSeparation: 0.2, lens: pinhole }, sensor: realistic, calibration: typicalCalib, source: 'stereo' },
   { name: 'STEREO cube fisheye r=0.3', rig: { preset: 'cube', radius: 0.3, lens: fisheye }, source: 'stereo' },
 ];
 const ideal = { blurSigma: 0, vignetting: 0, exposureEV: 0, exposureJitterEV: 0, whiteBalanceJitter: 0, fullWellElectrons: 0, readNoiseElectrons: 0 };
@@ -45,7 +50,7 @@ for (const c of configs) {
   const r = await page.evaluate(
     async ({ c, ideal, perfect }) => {
       const app = window.app;
-      Object.assign(app.settings.rig, { preset: 'ring', count: 8, radius: 0.1 }, c.rig);
+      Object.assign(app.settings.rig, { preset: 'ring', count: 8, radius: 0.1, eyeSeparation: 0.065, vergenceDeg: 0 }, c.rig);
       app.settings.rig.lens = { ...c.rig.lens };
       Object.assign(app.settings.sensor, ideal, c.sensor ?? {});
       Object.assign(app.settings.calibration, perfect, c.calibration ?? {});
@@ -59,7 +64,7 @@ for (const c of configs) {
   const { m, s } = r;
   const pct = (x) => `${(x * 100).toFixed(1)}%`.padStart(6);
   console.log(
-    `${c.name.padEnd(28)} pts=${String(m.reconPoints).padStart(8)} P=${pct(m.precision)} C=${pct(m.completeness)} F=${pct(m.fscore)}` +
+    `${c.name.padEnd(30)} pts=${String(m.reconPoints).padStart(8)} P=${pct(m.precision)} C=${pct(m.completeness)} F=${pct(m.fscore)}` +
       (s && c.source === 'stereo' ? `  | stereo density=${pct(s.density)} medErr=${pct(s.medianRelError)} ≤5%=${pct(s.within5pct)}` : '') +
       `  (${((Date.now() - t0) / 1000).toFixed(1)}s)`,
   );

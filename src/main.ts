@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type GUI from 'lil-gui';
 import './style.css';
 import { createRoom } from './scene/room';
 import { CameraRig, HELPER_LAYER } from './rig/CameraRig';
@@ -9,7 +8,7 @@ import { reconstruct, type PointCloud } from './recon/depthFusion';
 import { estimateStereo } from './recon/stereo';
 import { PointCloudView } from './recon/PointCloudView';
 import { evaluate, sampleSurface, type Metrics } from './eval/metrics';
-import { createGui, type Settings } from './ui/gui';
+import { createGui, type GuiHandle, type Settings } from './ui/gui';
 import { downloadDataset, downloadPly } from './export/export';
 import { LENS_PRESETS } from './camera/models';
 import { IDEAL_SENSOR } from './camera/sensor';
@@ -33,6 +32,8 @@ class App {
       count: 8,
       radius: 0.1,
       pitchDeg: 0,
+      eyeSeparation: 0.065,
+      vergenceDeg: 0,
       yawDeg: 0,
       centerX: 0,
       centerY: 1.4,
@@ -78,7 +79,7 @@ class App {
   readonly rig: CameraRig;
   readonly cloudView = new PointCloudView();
   readonly capturer: Capturer;
-  readonly gui: GUI;
+  readonly gui: GuiHandle;
 
   frames: CaptureFrame[] = [];
   cloud?: PointCloud;
@@ -140,7 +141,7 @@ class App {
   rebuildRig(): void {
     this.rig.rebuild(this.settings.rig);
     // Keep the panel in sync when settings are changed from code (console / tests).
-    this.gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    this.gui.refresh();
     this.applyView();
     this.status(`Rig: ${this.rig.cameras.length} cameras (capture is out of date).`);
   }

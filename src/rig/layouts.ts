@@ -1,15 +1,19 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
 
-export type RigPreset = 'ring' | 'sphere' | 'cube';
+export type RigPreset = 'ring' | 'sphere' | 'cube' | 'eyes';
 
 export interface RigLayoutParams {
   preset: RigPreset;
-  /** Number of cameras. Ignored for `cube`, which always has 6. */
+  /** Number of cameras; for `eyes`, the number of eye pairs. Ignored for `cube`, which always has 6. */
   count: number;
-  /** Distance of each camera's optical center from the rig center (m). 0 = all cameras share one center. */
+  /** Distance of each camera's optical center (each eye pair's midpoint for `eyes`) from the rig center (m). */
   radius: number;
-  /** Ring only: tilt of every camera, positive looks up (degrees). */
+  /** Ring and eyes: tilt of every camera, positive looks up (degrees). */
   pitchDeg: number;
+  /** Eyes only: distance between the two cameras of a pair (m); human eyes are ~0.065. */
+  eyeSeparation: number;
+  /** Eyes only: toe-in of each camera toward the pair's center line (degrees); 0 = parallel. */
+  vergenceDeg: number;
   /** Rotation of the whole rig around the vertical axis (degrees). */
   yawDeg: number;
 }
@@ -54,6 +58,28 @@ export function fibonacciDirections(count: number): Vector3[] {
   return dirs;
 }
 
+/**
+ * Pairs of cameras side by side like eyes: pair i faces the i-th ring direction, and its
+ * two cameras sit ±separation/2 along the pair's horizontal "right" axis, so their images
+ * overlap almost completely (short-baseline stereo, like a human head).
+ */
+function eyeRays(pairs: number, pitchDeg: number, separation: number, radius: number, vergenceDeg: number): (Ray & { shift: Vector3 })[] {
+  const out: (Ray & { shift: Vector3 })[] = [];
+  const toeIn = Math.tan(vergenceDeg * DEG);
+  for (const { view, offset } of ringRays(pairs, pitchDeg)) {
+    const right = new Vector3().crossVectors(offset, UP).normalize();
+    for (const side of [-1, 1]) {
+      out.push({
+        // Toe-in turns each eye toward the other one's side.
+        view: view.clone().addScaledVector(right, -side * toeIn).normalize(),
+        offset: offset.clone().multiplyScalar(radius),
+        shift: right.clone().multiplyScalar((side * separation) / 2),
+      });
+    }
+  }
+  return out;
+}
+
 function cubeRays(): Ray[] {
   return [
     new Vector3(0, 0, -1),
@@ -79,6 +105,16 @@ export function lookAlong(position: Vector3, direction: Vector3): Quaternion {
 }
 
 export function computeLayout(params: RigLayoutParams, center: Vector3): CameraPose[] {
+  const yaw = new Quaternion().setFromAxisAngle(UP, params.yawDeg * DEG);
+  if (params.preset === 'eyes') {
+    const eyes = eyeRays(Math.max(1, Math.round(params.count)), params.pitchDeg, params.eyeSeparation, params.radius, params.vergenceDeg);
+    return eyes.map(({ view, offset, shift }) => {
+      const direction = view.clone().applyQuaternion(yaw).normalize();
+      const position = offset.clone().add(shift).applyQuaternion(yaw).add(center);
+      return { position, quaternion: lookAlong(position, direction), direction };
+    });
+  }
+
   let rays: Ray[];
   switch (params.preset) {
     case 'ring':
@@ -92,7 +128,6 @@ export function computeLayout(params: RigLayoutParams, center: Vector3): CameraP
       break;
   }
 
-  const yaw = new Quaternion().setFromAxisAngle(UP, params.yawDeg * DEG);
   return rays.map(({ view, offset }) => {
     const direction = view.clone().applyQuaternion(yaw).normalize();
     const position = offset.clone().applyQuaternion(yaw).multiplyScalar(params.radius).add(center);
